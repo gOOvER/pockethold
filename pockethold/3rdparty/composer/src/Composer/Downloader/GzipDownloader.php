@@ -1,70 +1,67 @@
-<?php
+<?php declare(strict_types=1);
 
-
-
-
-
-
-
-
-
-
+/*
+ * This file is part of Composer.
+ *
+ * (c) Nils Adermann <naderman@naderman.de>
+ *     Jordi Boggiano <j.boggiano@seld.be>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
 
 namespace Composer\Downloader;
 
-use Composer\Config;
-use Composer\Cache;
-use Composer\EventDispatcher\EventDispatcher;
+use React\Promise\PromiseInterface;
 use Composer\Package\PackageInterface;
 use Composer\Util\Platform;
 use Composer\Util\ProcessExecutor;
-use Composer\Util\HttpDownloader;
-use Composer\IO\IOInterface;
-use Composer\Util\Filesystem;
 
-
-
-
-
-
+/**
+ * GZip archive downloader.
+ *
+ * @author Pavel Puchkin <i@neoascetic.me>
+ */
 class GzipDownloader extends ArchiveDownloader
 {
-protected function extract(PackageInterface $package, $file, $path)
-{
-$filename = pathinfo(parse_url($package->getDistUrl(), PHP_URL_PATH), PATHINFO_FILENAME);
-$targetFilepath = $path . DIRECTORY_SEPARATOR . $filename;
+    protected function extract(PackageInterface $package, string $file, string $path): PromiseInterface
+    {
+        $filename = pathinfo(parse_url(strtr((string) $package->getDistUrl(), '\\', '/'), PHP_URL_PATH), PATHINFO_FILENAME);
+        $targetFilepath = $path . DIRECTORY_SEPARATOR . $filename;
 
+        // Try to use gunzip on *nix
+        if (!Platform::isWindows()) {
+            $command = 'gzip -cd -- ' . ProcessExecutor::escape($file) . ' > ' . ProcessExecutor::escape($targetFilepath);
 
- if (!Platform::isWindows()) {
-$command = 'gzip -cd ' . ProcessExecutor::escape($file) . ' > ' . ProcessExecutor::escape($targetFilepath);
+            if (0 === $this->process->execute($command, $ignoredOutput)) {
+                return \React\Promise\resolve(null);
+            }
 
-if (0 === $this->process->execute($command, $ignoredOutput)) {
-return;
-}
+            if (extension_loaded('zlib')) {
+                // Fallback to using the PHP extension.
+                $this->extractUsingExt($file, $targetFilepath);
 
-if (extension_loaded('zlib')) {
+                return \React\Promise\resolve(null);
+            }
 
- $this->extractUsingExt($file, $targetFilepath);
+            $processError = 'Failed to execute ' . $command . "\n\n" . $this->process->getErrorOutput();
+            throw new \RuntimeException($processError);
+        }
 
-return;
-}
+        // Windows version of PHP has built-in support of gzip functions
+        $this->extractUsingExt($file, $targetFilepath);
 
-$processError = 'Failed to execute ' . $command . "\n\n" . $this->process->getErrorOutput();
-throw new \RuntimeException($processError);
-}
+        return \React\Promise\resolve(null);
+    }
 
-
- $this->extractUsingExt($file, $targetFilepath);
-}
-
-private function extractUsingExt($file, $targetFilepath)
-{
-$archiveFile = gzopen($file, 'rb');
-$targetFile = fopen($targetFilepath, 'wb');
-while ($string = gzread($archiveFile, 4096)) {
-fwrite($targetFile, $string, Platform::strlen($string));
-}
-gzclose($archiveFile);
-fclose($targetFile);
-}
+    private function extractUsingExt(string $file, string $targetFilepath): void
+    {
+        $archiveFile = gzopen($file, 'rb');
+        $targetFile = fopen($targetFilepath, 'wb');
+        while ($string = gzread($archiveFile, 4096)) {
+            fwrite($targetFile, $string, Platform::strlen($string));
+        }
+        gzclose($archiveFile);
+        fclose($targetFile);
+    }
 }

@@ -1,92 +1,139 @@
-<?php
+<?php declare(strict_types=1);
 
+/*
+ * This file is part of Composer.
+ *
+ * (c) Nils Adermann <naderman@naderman.de>
+ *     Jordi Boggiano <j.boggiano@seld.be>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
 
 namespace Composer\Util;
 
-use Composer\Package\Link;
 use Composer\Package\PackageInterface;
+use Composer\Package\RootPackageInterface;
 
 class PackageSorter
 {
+    /**
+     * Returns the most recent version of a set of packages
+     *
+     * This is ideally the default branch version, or failing that it will return the package with the highest version
+     *
+     * @template T of PackageInterface
+     * @param array<T> $packages
+     * @return ($packages is non-empty-array<T> ? T : T|null)
+     */
+    public static function getMostCurrentVersion(array $packages): ?PackageInterface
+    {
+        return array_reduce($packages, static function ($carry, $pkg) {
+            if ($carry === null) {
+                return $pkg;
+            }
 
+            if ($pkg->isDefaultBranch()) {
+                return $pkg;
+            }
 
+            if (!$carry->isDefaultBranch() && version_compare($carry->getVersion(), $pkg->getVersion(), '<')) {
+                return $pkg;
+            }
 
+            return $carry;
+        });
+    }
 
+    /**
+     * Sorts packages by name
+     *
+     * @template T of PackageInterface
+     * @param array<T> $packages
+     * @return array<T>
+     */
+    public static function sortPackagesAlphabetically(array $packages): array
+    {
+        usort($packages, static function (PackageInterface $a, PackageInterface $b) {
+            return $a->getName() <=> $b->getName();
+        });
 
+        return $packages;
+    }
 
+    /**
+     * Sorts packages by dependency weight
+     *
+     * Packages of equal weight are sorted alphabetically
+     *
+     * @param  PackageInterface[] $packages
+     * @param  array<string, int> $weights Pre-set weights for some packages to give them more (negative number) or less (positive) weight offsets
+     * @return PackageInterface[] sorted array
+     */
+    public static function sortPackages(array $packages, array $weights = []): array
+    {
+        $usageList = [];
 
+        foreach ($packages as $package) {
+            $links = $package->getRequires();
+            if ($package instanceof RootPackageInterface) {
+                $links = array_merge($links, $package->getDevRequires());
+            }
+            foreach ($links as $link) {
+                $target = $link->getTarget();
+                $usageList[$target][] = $package->getName();
+            }
+        }
+        $computing = [];
+        $computed = [];
+        $computeImportance = static function ($name) use (&$computeImportance, &$computing, &$computed, $usageList, $weights) {
+            // reusing computed importance
+            if (isset($computed[$name])) {
+                return $computed[$name];
+            }
 
-public static function sortPackages(array $packages) {
-$usageList = array();
+            // canceling circular dependency
+            if (isset($computing[$name])) {
+                return 0;
+            }
 
-foreach ($packages as $package) { 
-foreach (array_merge($package->getRequires(), $package->getDevRequires()) as $link) { 
-$target = $link->getTarget();
-$usageList[$target][] = $package->getName();
-}
-}
-$computing = array();
-$computed = array();
-$computeImportance = function ($name) use (&$computeImportance, &$computing, &$computed, $usageList) {
+            $computing[$name] = true;
+            $weight = $weights[$name] ?? 0;
 
- if (isset($computed[$name])) {
-return $computed[$name];
-}
+            if (isset($usageList[$name])) {
+                foreach ($usageList[$name] as $user) {
+                    $weight -= 1 - $computeImportance($user);
+                }
+            }
 
+            unset($computing[$name]);
+            $computed[$name] = $weight;
 
- if (isset($computing[$name])) {
-return 0;
-}
+            return $weight;
+        };
 
-$computing[$name] = true;
-$weight = 0;
+        $weightedPackages = [];
 
-if (isset($usageList[$name])) {
-foreach ($usageList[$name] as $user) {
-$weight -= 1 - $computeImportance($user);
-}
-}
+        foreach ($packages as $index => $package) {
+            $name = $package->getName();
+            $weight = $computeImportance($name);
+            $weightedPackages[] = ['name' => $name, 'weight' => $weight, 'index' => $index];
+        }
 
-unset($computing[$name]);
-$computed[$name] = $weight;
+        usort($weightedPackages, static function (array $a, array $b): int {
+            if ($a['weight'] !== $b['weight']) {
+                return $a['weight'] - $b['weight'];
+            }
 
-return $weight;
-};
+            return strnatcasecmp($a['name'], $b['name']);
+        });
 
-$weightList = array();
+        $sortedPackages = [];
 
-foreach ($packages as $index => $package) {
-$weight = $computeImportance($package->getName());
-$weightList[$index] = $weight;
-}
+        foreach ($weightedPackages as $pkg) {
+            $sortedPackages[] = $packages[$pkg['index']];
+        }
 
-$stable_sort = function (&$array) {
-static $transform, $restore;
-
-$i = 0;
-
-if (!$transform) {
-$transform = function (&$v, $k) use (&$i) {
-$v = array($v, ++$i, $k, $v);
-};
-
-$restore = function (&$v) {
-$v = $v[3];
-};
-}
-
-array_walk($array, $transform);
-asort($array);
-array_walk($array, $restore);
-};
-
-$stable_sort($weightList);
-
-$sortedPackages = array();
-
-foreach (array_keys($weightList) as $index) {
-$sortedPackages[] = $packages[$index];
-}
-return $sortedPackages;
-}
+        return $sortedPackages;
+    }
 }
